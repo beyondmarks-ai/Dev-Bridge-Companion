@@ -136,6 +136,59 @@ class DevBridgeApi {
     }
   }
 
+  Future<SdkHandoff> createSdkHandoff({
+    required ConnectionCredentials credentials,
+    required DevBridgeBuild build,
+  }) async {
+    final response = await _client
+        .post(
+          credentials.baseUri.resolve(
+            '/api/sessions/${credentials.sessionId}/builds/${build.id}/sdk-ticket',
+          ),
+          headers: {'Authorization': 'Bearer ${credentials.deviceToken}'},
+        )
+        .timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      throw DevBridgeException(
+        'Could not create the secure SDK handoff (${response.statusCode}).',
+      );
+    }
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    return SdkHandoff(
+      token: json['handoffToken'] as String,
+      expiresAt: DateTime.parse(json['expiresAt'] as String),
+    );
+  }
+
+  Future<String> uploadAttachment({
+    required ConnectionCredentials credentials,
+    required File file,
+    required String kind,
+    required DevBridgeBuild build,
+  }) async {
+    final request =
+        http.MultipartRequest(
+            'POST',
+            credentials.baseUri.resolve(
+              '/api/sessions/${credentials.sessionId}/attachments',
+            ),
+          )
+          ..headers['Authorization'] = 'Bearer ${credentials.deviceToken}'
+          ..fields['kind'] = kind
+          ..fields['buildId'] = build.id
+          ..files.add(await http.MultipartFile.fromPath('file', file.path));
+    final response = await _client
+        .send(request)
+        .timeout(const Duration(minutes: 3));
+    final body = await response.stream.bytesToString();
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw DevBridgeException(
+        'Attachment upload failed (${response.statusCode}).',
+      );
+    }
+    return (jsonDecode(body) as Map<String, dynamic>)['attachmentId'] as String;
+  }
+
   Future<SessionSnapshot> getSession(ConnectionCredentials credentials) async {
     final response = await _client
         .get(

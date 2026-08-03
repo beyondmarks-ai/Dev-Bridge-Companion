@@ -121,3 +121,10 @@ class SessionSnapshot {
             .toList(growable: false),
       );
 }
+
+class SdkHandoff {
+  const SdkHandoff({required this.token, required this.expiresAt});
+
+  final String token;
+  final DateTime expiresAt;
+}

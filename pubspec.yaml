@@ -1,7 +1,7 @@
 name: dev_bridge
 description: "Secure Android companion for DevBridge test delivery."
 publish_to: "none"
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: ^3.12.2
@@ -12,6 +12,8 @@ dependencies:
   crypto: ^3.0.7
   cupertino_icons: ^1.0.8
   device_info_plus: ^13.2.0
+  devbridge_diagnostics:
+    path: packages/devbridge_diagnostics
   flutter_secure_storage: ^10.3.1
   http: ^1.6.0
   mobile_scanner: ^7.4.0

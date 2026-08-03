@@ -1,14 +1,17 @@
 package com.example.dev_bridge
 
 import android.app.PendingIntent
+import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -18,6 +21,9 @@ import java.util.concurrent.ConcurrentHashMap
 
 class MainActivity : FlutterActivity() {
     private val pendingInstalls = ConcurrentHashMap<Int, MethodChannel.Result>()
+    private var recordingStartResult: MethodChannel.Result? = null
+    private var recordingStopResult: MethodChannel.Result? = null
+    private var recordingPath: String? = null
 
     private val installReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -44,24 +50,102 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private val recordingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val response = mapOf(
+                "status" to intent.getStringExtra("status"),
+                "path" to intent.getStringExtra("path"),
+                "error" to intent.getStringExtra("error"),
+            )
+            when (intent.getStringExtra("status")) {
+                "recording_started" -> {
+                    recordingStartResult?.success(response)
+                    recordingStartResult = null
+                }
+                "recording_stopped" -> {
+                    recordingStopResult?.success(response)
+                    recordingStopResult = null
+                    recordingPath = null
+                }
+                "recording_failed" -> {
+                    recordingStartResult?.success(response)
+                    recordingStopResult?.success(response)
+                    recordingStartResult = null
+                    recordingStopResult = null
+                    recordingPath = null
+                }
+            }
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val filter = IntentFilter(INSTALL_ACTION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(installReceiver, filter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(recordingReceiver, IntentFilter(ScreenRecordingService.STATUS_ACTION), RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("DEPRECATION")
             registerReceiver(installReceiver, filter)
+            registerReceiver(recordingReceiver, IntentFilter(ScreenRecordingService.STATUS_ACTION))
         }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, INSTALLER_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "installApk" -> installApk(call.argument("path"), result)
-                    "launchPackage" -> launchPackage(call.argument("packageName"), result)
+                    "launchPackage" -> launchPackage(
+                        call.argument("packageName"),
+                        call.argument("baseUrl"),
+                        call.argument("handoffToken"),
+                        result,
+                    )
+                    "startScreenRecording" -> startScreenRecording(result)
+                    "stopScreenRecording" -> stopScreenRecording(result)
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun startScreenRecording(result: MethodChannel.Result) {
+        if (recordingStartResult != null) {
+            result.error("recording_busy", "A recording request is already active.", null)
+            return
+        }
+        recordingStartResult = result
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        startActivityForResult(manager.createScreenCaptureIntent(), SCREEN_CAPTURE_REQUEST)
+    }
+
+    private fun stopScreenRecording(result: MethodChannel.Result) {
+        if (recordingPath == null) {
+            result.success(mapOf("status" to "not_recording", "error" to "No recording is active."))
+            return
+        }
+        recordingStopResult = result
+        startService(Intent(this, ScreenRecordingService::class.java).setAction(ScreenRecordingService.ACTION_STOP))
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != SCREEN_CAPTURE_REQUEST) return
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            recordingStartResult?.success(mapOf("status" to "permission_denied", "error" to "Screen recording permission was not granted."))
+            recordingStartResult = null
+            return
+        }
+        val metrics = resources.displayMetrics
+        val output = File(cacheDir, "devbridge-recording-${System.currentTimeMillis()}.mp4")
+        recordingPath = output.absolutePath
+        val service = Intent(this, ScreenRecordingService::class.java).apply {
+            action = ScreenRecordingService.ACTION_START
+            putExtra(ScreenRecordingService.EXTRA_RESULT_DATA, data)
+            putExtra(ScreenRecordingService.EXTRA_WIDTH, metrics.widthPixels)
+            putExtra(ScreenRecordingService.EXTRA_HEIGHT, metrics.heightPixels)
+            putExtra(ScreenRecordingService.EXTRA_DENSITY, metrics.densityDpi)
+            putExtra(ScreenRecordingService.EXTRA_OUTPUT_PATH, output.absolutePath)
+        }
+        ContextCompat.startForegroundService(this, service)
     }
 
     private fun installApk(path: String?, result: MethodChannel.Result) {
@@ -114,7 +198,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun launchPackage(targetPackage: String?, result: MethodChannel.Result) {
+    private fun launchPackage(targetPackage: String?, baseUrl: String?, handoffToken: String?, result: MethodChannel.Result) {
         if (targetPackage.isNullOrBlank()) {
             result.success(resultMap("package_unknown", "The session does not specify an application package name.", null, null, null))
             return
@@ -125,7 +209,11 @@ class MainActivity : FlutterActivity() {
             return
         }
         try {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            launchIntent.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra("devbridge.baseUrl", baseUrl)
+                putExtra("devbridge.handoffToken", handoffToken)
+            }
             startActivity(launchIntent)
             result.success(resultMap("launch_requested", "Application launch requested.", null, targetPackage, null))
         } catch (exception: Exception) {
@@ -173,6 +261,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(installReceiver) }
+        runCatching { unregisterReceiver(recordingReceiver) }
         pendingInstalls.values.forEach { it.error("activity_destroyed", "DevBridge closed before installation completed.", null) }
         pendingInstalls.clear()
         super.onDestroy()
@@ -181,5 +270,6 @@ class MainActivity : FlutterActivity() {
     private companion object {
         const val INSTALLER_CHANNEL = "devbridge/apk_installer"
         const val INSTALL_ACTION = "com.example.dev_bridge.INSTALL_RESULT"
+        const val SCREEN_CAPTURE_REQUEST = 7310
     }
 }

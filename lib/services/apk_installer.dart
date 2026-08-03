@@ -41,11 +41,17 @@ class ApkInstaller {
     return InstallResult.fromMap(result ?? const {});
   }
 
-  Future<InstallResult> launch(String packageName) async {
-    final result = await _channel.invokeMethod<Map<Object?, Object?>>(
-      'launchPackage',
-      {'packageName': packageName},
-    );
+  Future<InstallResult> launch({
+    required String packageName,
+    required Uri baseUri,
+    required String handoffToken,
+  }) async {
+    final result = await _channel
+        .invokeMethod<Map<Object?, Object?>>('launchPackage', {
+          'packageName': packageName,
+          'baseUrl': baseUri.toString(),
+          'handoffToken': handoffToken,
+        });
     return InstallResult.fromMap(result ?? const {});
   }
 }

@@ -16,7 +16,17 @@ dependencies:
 
 ## Initialize
 
-Initialize before `runApp`, using credentials issued for the active test session:
+For builds launched by the companion, exchange the one-use handoff automatically before `runApp`:
+
+```dart
+final diagnostics = await DevBridgeDiagnostics.initializeFromLaunch(
+  appVersion: '1.4.0+82',
+);
+```
+
+The handoff arrives as explicit intent extras for only the selected package, expires after two minutes, and can be exchanged once. The returned SDK credential is separate from the companion credential and scoped to the session and build.
+
+Manual initialization remains available for CI or controlled test environments:
 
 ```dart
 final diagnostics = await DevBridgeDiagnostics.initialize(
@@ -42,6 +52,8 @@ Never hard-code a long-lived production secret. DevBridge device tokens are shor
 - Lifecycle transitions
 - Named route changes
 - Aggregated slow-frame samples
+- Android historical ANRs, native crashes, low-memory kills, and initialization failures
+- Target-owned screenshots through `DevBridgeCaptureBoundary`
 - Developer-defined diagnostic events
 
 The SDK batches events, bounds its in-memory queue, and relies on the server to redact common credential fields before Azure archival.

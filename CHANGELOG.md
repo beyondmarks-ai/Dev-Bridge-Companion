@@ -8,7 +8,18 @@ All notable changes are documented in this file.
 
 - Background build notifications.
 - Resumable downloads.
-- Tester screenshots, recordings, and annotated attachments.
+- Screenshot annotation, voice notes, and structured test reports.
+
+## [0.3.0] - 2026-08-03
+
+### Added
+
+- Two-minute, one-use SDK handoff passed through an explicit Android launch intent.
+- Automatic exchange for a separate build-scoped SDK token.
+- Android 11+ historical ANR, native crash, low-memory, and process-exit collection.
+- Consent-driven MediaProjection screen recording with foreground notification.
+- Recording upload to protected Azure diagnostic attachments.
+- SDK screenshot capture boundary and authenticated attachment upload.
 
 ## [0.2.0] - 2026-08-03
 

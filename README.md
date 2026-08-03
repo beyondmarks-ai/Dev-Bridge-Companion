@@ -25,6 +25,9 @@ The app pairs with a DevBridge server by scanning a short-lived QR code. After p
 - Device, OS, ABI, screen-size, density, text-scale, orientation, and theme context.
 - Automatic launch of a successfully installed package when its package name is configured.
 - Included `devbridge_diagnostics` Flutter package for opt-in target-app telemetry.
+- Automatic one-use SDK enrollment when DevBridge launches an instrumented target app.
+- User-consented Android screen recording with a visible foreground-service notification.
+- Automatic upload of completed recordings to the protected diagnostic timeline.
 - Secure disconnect and credential removal.
 
 ## How it works
@@ -155,7 +158,7 @@ See [SECURITY.md](SECURITY.md) for responsible reporting and deployment consider
 - Release signing is not configured; the template currently uses debug signing.
 - There are no background build notifications yet.
 - Downloads are not resumable after process termination.
-- Automatic private runtime telemetry requires the target app to initialize the included opt-in SDK.
+- Automatic private runtime telemetry requires the target app to call `DevBridgeDiagnostics.initializeFromLaunch()`.
 - The bundled scanner makes debug builds relatively large.
 
 ## Roadmap
@@ -177,14 +180,15 @@ See [SECURITY.md](SECURITY.md) for responsible reporting and deployment consider
 
 ### Diagnostics SDK
 
-- Native Android historical exit, ANR, and native-crash support.
+- Android 11+ historical process-exit, ANR trace, low-memory, initialization-failure, and native tombstone collection.
+- Target-owned Flutter screenshot capture and authenticated Azure upload.
 - Redacted HTTP breadcrumbs and persistent offline buffering.
 - Sampling, explicit consent controls, and project-level collection policies.
 
 ### Platform and enterprise
 
 - iOS tester distribution workflow where platform rules permit.
-- Track `mobile_scanner` and migrate when its built-in Kotlin support is released.
+- Migrate `mobile_scanner` and the diagnostics plugin to Flutter's built-in Kotlin configuration.
 - Microsoft Entra user identity and organization membership.
 - Android Enterprise managed-device installation.
 - Accessibility, localization, tablet layouts, and branded themes.

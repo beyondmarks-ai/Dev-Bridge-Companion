@@ -9,6 +9,7 @@ import 'models/devbridge_models.dart';
 import 'services/credential_store.dart';
 import 'services/apk_installer.dart';
 import 'services/devbridge_api.dart';
+import 'services/screen_recorder.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -62,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _api = DevBridgeApi();
   final _store = CredentialStore();
   final _installer = ApkInstaller();
+  final _screenRecorder = ScreenRecorder();
   final Map<String, File> _verifiedApks = {};
   ConnectionCredentials? _credentials;
   SessionSnapshot? _snapshot;
@@ -71,6 +73,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _downloadingBuildId;
   double? _downloadProgress;
   String? _downloadMessage;
+  bool _recording = false;
+  DevBridgeBuild? _recordingBuild;
 
   @override
   void initState() {
@@ -287,7 +291,15 @@ class _HomeScreenState extends State<HomeScreen> {
       final packageName = result.packageName ?? _snapshot?.packageName;
       InstallResult? launch;
       if (result.succeeded && packageName != null && packageName.isNotEmpty) {
-        launch = await _installer.launch(packageName);
+        final handoff = await _api.createSdkHandoff(
+          credentials: _credentials!,
+          build: build,
+        );
+        launch = await _installer.launch(
+          packageName: packageName,
+          baseUri: _credentials!.baseUri,
+          handoffToken: handoff.token,
+        );
         await _api.reportDiagnostic(
           credentials: _credentials!,
           category: 'launch',
@@ -339,6 +351,54 @@ class _HomeScreenState extends State<HomeScreen> {
           _downloadProgress = null;
         });
       }
+    }
+  }
+
+  Future<void> _startRecording() async {
+    final builds = _snapshot?.builds;
+    if (_recording || builds == null || builds.isEmpty) return;
+    final result = await _screenRecorder.start();
+    if (!mounted) return;
+    setState(() {
+      _recording = result.status == 'recording_started';
+      _recordingBuild = _recording ? builds.first : null;
+      _downloadMessage = _recording
+          ? 'Screen recording active. Open and test the app, then return here to stop and upload.'
+          : result.error ?? 'Screen recording could not start.';
+    });
+  }
+
+  Future<void> _stopRecording() async {
+    if (!_recording) return;
+    final (result, file) = await _screenRecorder.stop();
+    final build = _recordingBuild;
+    if (mounted) {
+      setState(() {
+        _recording = false;
+        _downloadMessage = file == null
+            ? result.error ?? 'Screen recording failed.'
+            : 'Uploading screen recording…';
+      });
+    }
+    if (file == null || build == null || _credentials == null) return;
+    try {
+      await _api.uploadAttachment(
+        credentials: _credentials!,
+        file: file,
+        kind: 'recording',
+        build: build,
+      );
+      if (mounted) {
+        setState(
+          () => _downloadMessage =
+              'Screen recording uploaded to the developer dashboard.',
+        );
+      }
+    } catch (error) {
+      if (mounted) setState(() => _downloadMessage = error.toString());
+    } finally {
+      if (await file.exists()) await file.delete();
+      _recordingBuild = null;
     }
   }
 
@@ -400,6 +460,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 downloadingBuildId: _downloadingBuildId,
                 downloadProgress: _downloadProgress,
                 downloadMessage: _downloadMessage,
+                recording: _recording,
+                onStartRecording: _startRecording,
+                onStopRecording: _stopRecording,
               ),
       ),
     ),
@@ -477,6 +540,9 @@ class _ConnectedView extends StatelessWidget {
     required this.downloadingBuildId,
     required this.downloadProgress,
     required this.downloadMessage,
+    required this.recording,
+    required this.onStartRecording,
+    required this.onStopRecording,
   });
   final ConnectionCredentials credentials;
   final SessionSnapshot? snapshot;
@@ -486,6 +552,9 @@ class _ConnectedView extends StatelessWidget {
   final String? downloadingBuildId;
   final double? downloadProgress;
   final String? downloadMessage;
+  final bool recording;
+  final Future<void> Function() onStartRecording;
+  final Future<void> Function() onStopRecording;
 
   @override
   Widget build(BuildContext context) => RefreshIndicator(
@@ -558,6 +627,32 @@ class _ConnectedView extends StatelessWidget {
               ),
             ),
           ),
+        Card(
+          child: ListTile(
+            leading: Icon(
+              recording ? Icons.fiber_manual_record : Icons.videocam_outlined,
+              color: recording
+                  ? const Color(0xFFFF6B75)
+                  : const Color(0xFF5DF2AD),
+            ),
+            title: Text(
+              recording ? 'Recording test session' : 'Capture screen recording',
+            ),
+            subtitle: Text(
+              recording
+                  ? 'Return here after testing to stop and upload.'
+                  : 'Android will ask which screen or app you consent to share.',
+            ),
+            trailing: FilledButton(
+              onPressed: snapshot == null || snapshot!.builds.isEmpty
+                  ? null
+                  : recording
+                  ? onStopRecording
+                  : onStartRecording,
+              child: Text(recording ? 'Stop & upload' : 'Start'),
+            ),
+          ),
+        ),
         const Padding(
           padding: EdgeInsets.fromLTRB(4, 22, 4, 10),
           child: Text(

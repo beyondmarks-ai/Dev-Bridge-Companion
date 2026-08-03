@@ -6,8 +6,11 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 class DevBridgeDiagnosticsConfig {
   const DevBridgeDiagnosticsConfig({
@@ -33,6 +36,7 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
   DevBridgeDiagnostics._(this._config, this._client);
 
   static DevBridgeDiagnostics? _instance;
+  static const MethodChannel _native = MethodChannel('devbridge/diagnostics');
 
   final DevBridgeDiagnosticsConfig _config;
   final http.Client _client;
@@ -86,6 +90,99 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
       },
     );
     return diagnostics;
+  }
+
+  static Future<DevBridgeDiagnostics?> initializeFromLaunch({
+    http.Client? client,
+    String? appVersion,
+    String environment = 'test',
+  }) async {
+    WidgetsFlutterBinding.ensureInitialized();
+    Map<Object?, Object?>? handoff;
+    try {
+      handoff = await _native.invokeMethod<Map<Object?, Object?>>(
+        'getLaunchHandoff',
+      );
+    } on MissingPluginException {
+      return null;
+    }
+    if (handoff == null) return null;
+    final baseUri = Uri.tryParse(handoff['baseUrl'] as String? ?? '');
+    final handoffToken = handoff['handoffToken'] as String?;
+    if (baseUri == null || handoffToken == null) return null;
+    final transport = client ?? http.Client();
+    try {
+      final response = await transport
+          .post(
+            baseUri.resolve('/api/sdk/exchange'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({'handoffToken': handoffToken}),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return null;
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      final diagnostics = await initialize(
+        DevBridgeDiagnosticsConfig(
+          baseUri: Uri.parse(json['baseUrl'] as String),
+          sessionId: json['sessionId'] as String,
+          deviceToken: json['sdkToken'] as String,
+          buildId: json['buildId'] as String,
+          appVersion: appVersion,
+          environment: environment,
+        ),
+        client: transport,
+      );
+      await diagnostics._captureHistoricalExits();
+      return diagnostics;
+    } catch (_) {
+      if (client == null) transport.close();
+      return null;
+    }
+  }
+
+  Future<void> _captureHistoricalExits() async {
+    List<Object?> exits;
+    try {
+      exits =
+          await _native.invokeMethod<List<Object?>>(
+            'getHistoricalExitReasons',
+          ) ??
+          const [];
+    } on MissingPluginException {
+      return;
+    }
+    for (final raw in exits) {
+      final exit = Map<String, Object?>.from(raw! as Map);
+      final reason = exit['reason'] as String? ?? 'unknown';
+      final isAnr = reason == 'anr';
+      final isCrash = reason == 'native_crash' || reason == 'java_crash';
+      await capture(
+        category: isAnr
+            ? 'anr'
+            : isCrash
+            ? 'crash'
+            : 'process_exit',
+        eventType: 'historical_$reason',
+        level: isAnr || isCrash ? 'fatal' : 'warning',
+        message:
+            'Previous application process exited because of ${reason.replaceAll('_', ' ')}.',
+        details: exit['description'] as String?,
+        stackTrace: exit['trace'] == null
+            ? null
+            : StackTrace.fromString(exit['trace'] as String),
+        metrics: {
+          'pssKb': (exit['pssKb'] as num?)?.toDouble() ?? 0,
+          'rssKb': (exit['rssKb'] as num?)?.toDouble() ?? 0,
+          'status': (exit['status'] as num?)?.toDouble() ?? 0,
+        },
+        context: {
+          'traceEncoding': exit['traceEncoding'] as String? ?? 'none',
+          'reasonCode': '${exit['reasonCode']}',
+          'importance': '${exit['importance']}',
+        },
+      );
+    }
+    await flush();
   }
 
   void _installHandlers() {
@@ -232,6 +329,39 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     }
   }
 
+  Future<String?> uploadAttachment({
+    required List<int> bytes,
+    required String fileName,
+    required String contentType,
+    required String kind,
+  }) async {
+    final request =
+        http.MultipartRequest(
+            'POST',
+            _config.baseUri.resolve(
+              '/api/sessions/${_config.sessionId}/attachments',
+            ),
+          )
+          ..headers['Authorization'] = 'Bearer ${_config.deviceToken}'
+          ..fields['buildId'] = _config.buildId
+          ..fields['kind'] = kind
+          ..files.add(
+            http.MultipartFile.fromBytes(
+              'file',
+              bytes,
+              filename: fileName,
+              contentType: MediaType.parse(contentType),
+            ),
+          );
+    final response = await _client
+        .send(request)
+        .timeout(const Duration(seconds: 60));
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+    final body = await response.stream.bytesToString();
+    return (jsonDecode(body) as Map<String, dynamic>)['attachmentId']
+        as String?;
+  }
+
   Future<void> dispose() async {
     _flushTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
@@ -251,6 +381,42 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     _client.close();
     if (identical(_instance, this)) _instance = null;
   }
+}
+
+class DevBridgeCaptureController {
+  final GlobalKey boundaryKey = GlobalKey();
+
+  Future<String?> captureScreenshot({double pixelRatio = 1.5}) async {
+    final context = boundaryKey.currentContext;
+    if (context == null) return null;
+    final boundary = context.findRenderObject() as RenderRepaintBoundary?;
+    if (boundary == null || boundary.debugNeedsPaint) return null;
+    final image = await boundary.toImage(pixelRatio: pixelRatio.clamp(1, 3));
+    final data = await image.toByteData(format: ImageByteFormat.png);
+    image.dispose();
+    if (data == null) return null;
+    return DevBridgeDiagnostics.instance.uploadAttachment(
+      bytes: data.buffer.asUint8List(),
+      fileName: 'devbridge-${DateTime.now().millisecondsSinceEpoch}.png',
+      contentType: 'image/png',
+      kind: 'screenshot',
+    );
+  }
+}
+
+class DevBridgeCaptureBoundary extends StatelessWidget {
+  const DevBridgeCaptureBoundary({
+    required this.controller,
+    required this.child,
+    super.key,
+  });
+
+  final DevBridgeCaptureController controller;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      RepaintBoundary(key: controller.boundaryKey, child: child);
 }
 
 class DevBridgeNavigatorObserver extends NavigatorObserver {
