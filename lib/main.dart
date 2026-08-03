@@ -151,6 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ? 'Android phone'
             : controller.text.trim(),
         platformVersion: android.version.release,
+        context: _deviceContext(android),
       );
       await _store.save(credentials);
       _credentials = credentials;
@@ -167,6 +168,24 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Map<String, String> _deviceContext(AndroidDeviceInfo android) {
+    final media = MediaQuery.of(context);
+    return {
+      'manufacturer': android.manufacturer,
+      'model': android.model,
+      'brand': android.brand,
+      'sdkInt': android.version.sdkInt.toString(),
+      'supportedAbis': android.supportedAbis.join(','),
+      'physicalDevice': android.isPhysicalDevice.toString(),
+      'screenWidthDp': media.size.width.toStringAsFixed(0),
+      'screenHeightDp': media.size.height.toStringAsFixed(0),
+      'devicePixelRatio': media.devicePixelRatio.toStringAsFixed(2),
+      'textScale': media.textScaler.scale(1).toStringAsFixed(2),
+      'orientation': media.orientation.name,
+      'brightness': media.platformBrightness.name,
+    };
   }
 
   void _startPolling() {
@@ -203,6 +222,17 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
+      unawaited(
+        _api
+            .reportDiagnostic(
+              credentials: _credentials!,
+              category: 'delivery',
+              eventType: 'download_started',
+              message: 'Secure APK download started.',
+              buildId: build.id,
+            )
+            .catchError((_) {}),
+      );
       var apk = _verifiedApks[build.id];
       if (apk == null || !await apk.exists()) {
         apk = await _api.downloadBuild(
@@ -224,6 +254,20 @@ class _HomeScreenState extends State<HomeScreen> {
         _verifiedApks[build.id] = apk;
       }
 
+      unawaited(
+        _api
+            .reportDiagnostic(
+              credentials: _credentials!,
+              category: 'delivery',
+              eventType: 'apk_verified',
+              message:
+                  'APK download completed and SHA-256 verification passed.',
+              buildId: build.id,
+              metrics: {'sizeBytes': build.sizeBytes.toDouble()},
+            )
+            .catchError((_) {}),
+      );
+
       if (mounted) {
         setState(() {
           _downloadProgress = 1;
@@ -231,16 +275,57 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
       final result = await _installer.install(apk);
+      await _api.reportInstallation(
+        credentials: _credentials!,
+        build: build,
+        status: result.status,
+        message: result.message,
+        packageName: result.packageName ?? _snapshot?.packageName,
+        statusCode: result.statusCode,
+        details: result.details,
+      );
+      final packageName = result.packageName ?? _snapshot?.packageName;
+      InstallResult? launch;
+      if (result.succeeded && packageName != null && packageName.isNotEmpty) {
+        launch = await _installer.launch(packageName);
+        await _api.reportDiagnostic(
+          credentials: _credentials!,
+          category: 'launch',
+          eventType: launch.status,
+          message: launch.message,
+          level: launch.status == 'launch_requested' ? 'info' : 'error',
+          details: launch.details,
+          buildId: build.id,
+          context: {'packageName': packageName},
+        );
+      }
       if (mounted) {
-        setState(() {
-          _downloadMessage = result == InstallLaunchResult.permissionRequired
-              ? 'Enable “Allow from this source”, return here, then tap Install again.'
-              : 'Android Package Installer opened.';
-        });
+        setState(
+          () => _downloadMessage = launch == null
+              ? result.message
+              : '${result.message} ${launch.message}',
+        );
       }
     } on DevBridgeException catch (error) {
       if (mounted) setState(() => _downloadMessage = error.message);
-    } catch (_) {
+    } catch (error, stackTrace) {
+      final credentials = _credentials;
+      if (credentials != null) {
+        unawaited(
+          _api
+              .reportDiagnostic(
+                credentials: credentials,
+                category: 'companion',
+                eventType: 'delivery_failed',
+                message: 'APK delivery or installer workflow failed.',
+                level: 'error',
+                details: error.toString(),
+                buildId: build.id,
+                context: {'stackTrace': stackTrace.toString()},
+              )
+              .catchError((_) {}),
+        );
+      }
       if (mounted) {
         setState(
           () => _downloadMessage =

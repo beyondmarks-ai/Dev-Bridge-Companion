@@ -22,6 +22,7 @@ class DevBridgeApi {
     required PairingPayload payload,
     required String deviceName,
     required String platformVersion,
+    required Map<String, String> context,
   }) async {
     final response = await _client
         .post(
@@ -32,6 +33,7 @@ class DevBridgeApi {
             'deviceName': deviceName,
             'platform': 'Android',
             'platformVersion': platformVersion,
+            'context': context,
           }),
         )
         .timeout(const Duration(seconds: 12));
@@ -50,6 +52,88 @@ class DevBridgeApi {
       deviceToken: json['deviceToken'] as String,
       deviceName: deviceName,
     );
+  }
+
+  Future<void> reportInstallation({
+    required ConnectionCredentials credentials,
+    required DevBridgeBuild build,
+    required String status,
+    required String message,
+    String? packageName,
+    int? statusCode,
+    String? details,
+  }) async {
+    final response = await _client
+        .post(
+          credentials.baseUri.resolve(
+            '/api/sessions/${credentials.sessionId}/installations',
+          ),
+          headers: {
+            'Authorization': 'Bearer ${credentials.deviceToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'buildId': build.id,
+            'status': status,
+            'message': message,
+            'packageName': packageName,
+            'statusCode': statusCode,
+            'details': details,
+            'occurredAt': DateTime.now().toUtc().toIso8601String(),
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (response.statusCode != 202) {
+      throw DevBridgeException(
+        'Could not report installation result (${response.statusCode}).',
+      );
+    }
+  }
+
+  Future<void> reportDiagnostic({
+    required ConnectionCredentials credentials,
+    required String category,
+    required String eventType,
+    required String message,
+    String level = 'info',
+    String? details,
+    String? screen,
+    String? buildId,
+    Map<String, double>? metrics,
+    Map<String, String>? context,
+  }) async {
+    final response = await _client
+        .post(
+          credentials.baseUri.resolve(
+            '/api/sessions/${credentials.sessionId}/diagnostics/batch',
+          ),
+          headers: {
+            'Authorization': 'Bearer ${credentials.deviceToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'events': [
+              {
+                'level': level,
+                'category': category,
+                'eventType': eventType,
+                'message': message,
+                'details': details,
+                'screen': screen,
+                'buildId': buildId,
+                'metrics': metrics,
+                'context': context,
+                'occurredAt': DateTime.now().toUtc().toIso8601String(),
+              },
+            ],
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (response.statusCode != 202) {
+      throw DevBridgeException(
+        'Could not report diagnostic event (${response.statusCode}).',
+      );
+    }
   }
 
   Future<SessionSnapshot> getSession(ConnectionCredentials credentials) async {

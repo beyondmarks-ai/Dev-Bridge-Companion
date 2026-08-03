@@ -20,7 +20,11 @@ The app pairs with a DevBridge server by scanning a short-lived QR code. After p
 - Download progress and user-visible failure states.
 - Client-side SHA-256 verification before installation.
 - Android unknown-source permission guidance.
-- FileProvider-based handoff to Android Package Installer.
+- Android `PackageInstaller` sessions with structured success and failure reasons.
+- Automatic reporting of download, verification, installation, and launch outcomes.
+- Device, OS, ABI, screen-size, density, text-scale, orientation, and theme context.
+- Automatic launch of a successfully installed package when its package name is configured.
+- Included `devbridge_diagnostics` Flutter package for opt-in target-app telemetry.
 - Secure disconnect and credential removal.
 
 ## How it works
@@ -41,7 +45,10 @@ Developer dashboard                 DevBridge Companion
               download → SHA-256 verify
                        │
                        ▼
-              Android Package Installer
+              Android PackageInstaller session
+                       │
+                       ▼
+        status + launch result → diagnostics dashboard
 ```
 
 The companion cannot silently install an APK on a normal personal Android device. Android requires the user to allow installation from this source and confirm each install or update.
@@ -53,14 +60,14 @@ The companion cannot silently install an APK on a normal personal Android device
 ├── android/
 │   └── app/src/main/
 │       ├── AndroidManifest.xml
-│       ├── kotlin/.../MainActivity.kt   Package Installer bridge
-│       └── res/xml/                     FileProvider paths
+│       └── kotlin/.../MainActivity.kt   PackageInstaller session bridge
 ├── lib/
 │   ├── models/devbridge_models.dart     Protocol models and QR validation
 │   ├── services/apk_installer.dart      Flutter platform-channel client
 │   ├── services/credential_store.dart   Encrypted credentials
 │   ├── services/devbridge_api.dart      Pair, poll, download, and verify
 │   └── main.dart                        Application state and UI
+├── packages/devbridge_diagnostics/      Target-app crash/performance SDK
 ├── test/
 │   └── pairing_payload_test.dart
 └── pubspec.yaml
@@ -135,7 +142,7 @@ Cleartext Android traffic is enabled only to support this private-LAN mode. Publ
 - Device tokens are stored with `flutter_secure_storage`, not ordinary preferences.
 - Download tickets are scoped, one-use, and short-lived.
 - The downloaded bytes are verified against the server-provided SHA-256 before installer launch.
-- FileProvider grants temporary read access to one cached APK rather than exposing a filesystem path.
+- APK bytes are streamed into an Android-owned package installation session.
 - The companion never receives the developer access key.
 - Diagnostic features must redact authorization headers, credentials, personal data, and sensitive API payloads.
 
@@ -148,7 +155,7 @@ See [SECURITY.md](SECURITY.md) for responsible reporting and deployment consider
 - Release signing is not configured; the template currently uses debug signing.
 - There are no background build notifications yet.
 - Downloads are not resumable after process termination.
-- The app does not yet capture logs or crashes from a separately installed target app.
+- Automatic private runtime telemetry requires the target app to initialize the included opt-in SDK.
 - The bundled scanner makes debug builds relatively large.
 
 ## Roadmap
@@ -170,10 +177,9 @@ See [SECURITY.md](SECURITY.md) for responsible reporting and deployment consider
 
 ### Diagnostics SDK
 
-- Opt-in SDK embedded in the target application.
-- Structured logs, custom events, non-fatal exceptions, crashes, and ANRs.
-- Redacted HTTP breadcrumbs and user-flow context.
-- Local buffering, sampling, consent controls, and upload policies.
+- Native Android historical exit, ANR, and native-crash support.
+- Redacted HTTP breadcrumbs and persistent offline buffering.
+- Sampling, explicit consent controls, and project-level collection policies.
 
 ### Platform and enterprise
 
