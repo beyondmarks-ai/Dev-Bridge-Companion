@@ -35,9 +35,15 @@ class DevBridgeDiagnosticsPlugin : FlutterPlugin, ActivityAware, MethodChannel.M
         val intent = activity?.intent ?: return null
         val baseUrl = intent.getStringExtra(BASE_URL) ?: return null
         val token = intent.getStringExtra(HANDOFF_TOKEN) ?: return null
+        val captureId = intent.getStringExtra(CAPTURE_ID)
         intent.removeExtra(BASE_URL)
         intent.removeExtra(HANDOFF_TOKEN)
-        return mapOf("baseUrl" to baseUrl, "handoffToken" to token)
+        intent.removeExtra(CAPTURE_ID)
+        return buildMap {
+            put("baseUrl", baseUrl)
+            put("handoffToken", token)
+            captureId?.let { put("captureId", it) }
+        }
     }
 
     private fun readHistoricalExits(): List<Map<String, Any?>> {
@@ -95,6 +101,7 @@ class DevBridgeDiagnosticsPlugin : FlutterPlugin, ActivityAware, MethodChannel.M
         const val CHANNEL = "devbridge/diagnostics"
         const val BASE_URL = "devbridge.baseUrl"
         const val HANDOFF_TOKEN = "devbridge.handoffToken"
+        const val CAPTURE_ID = "devbridge.captureId"
         const val PREFERENCES = "devbridge_diagnostics"
         const val LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
         const val MAX_TRACE_BYTES = 64 * 1024

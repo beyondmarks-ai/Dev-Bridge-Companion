@@ -1,6 +1,6 @@
 name: devbridge_diagnostics
 description: Opt-in Flutter diagnostics SDK for DevBridge test sessions.
-version: 0.2.0
+version: 0.3.0
 publish_to: "none"
 
 environment:

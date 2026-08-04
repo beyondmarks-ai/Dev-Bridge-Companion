@@ -44,4 +44,33 @@ void main() {
       isNull,
     );
   });
+
+  test('parses an assigned guided test run', () {
+    final snapshot = SessionSnapshot.fromJson({
+      'projectName': 'Shop',
+      'appName': 'Shop Mobile',
+      'packageName': 'example.shop',
+      'expiresAt': '2026-08-05T00:00:00Z',
+      'builds': <dynamic>[],
+      'testRuns': [
+        {
+          'id': 'run-1',
+          'testCaseId': 'case-1',
+          'status': 'ready',
+          'buildId': null,
+          'captureId': null,
+          'testCase': {
+            'title': 'Complete checkout',
+            'instructions': '1. Tap Pay now.',
+            'expectedResult': 'Confirmation is visible.',
+            'priority': 'critical',
+          },
+        },
+      ],
+    });
+
+    expect(snapshot.testRuns, hasLength(1));
+    expect(snapshot.testRuns.single.title, 'Complete checkout');
+    expect(snapshot.testRuns.single.priority, 'critical');
+  });
 }

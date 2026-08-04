@@ -75,6 +75,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _downloadMessage;
   bool _recording = false;
   DevBridgeBuild? _recordingBuild;
+  String? _recordingId;
+  GuidedTestRun? _activeTestRun;
 
   @override
   void initState() {
@@ -359,19 +361,228 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_recording || builds == null || builds.isEmpty) return;
     final result = await _screenRecorder.start();
     if (!mounted) return;
+    final requestedBuildId = _activeTestRun?.buildId;
+    final build = requestedBuildId == null
+        ? builds.first
+        : builds.where((item) => item.id == requestedBuildId).firstOrNull ??
+              builds.first;
+    final capturePrefix = _activeTestRun == null ? 'capture' : 'test';
+    final captureId =
+        '$capturePrefix-${DateTime.now().millisecondsSinceEpoch}-${_activeTestRun?.id.substring(0, 8) ?? build.id.substring(0, 8)}';
     setState(() {
       _recording = result.status == 'recording_started';
-      _recordingBuild = _recording ? builds.first : null;
+      _recordingBuild = _recording ? build : null;
+      _recordingId = _recording ? captureId : null;
       _downloadMessage = _recording
-          ? 'Screen recording active. Open and test the app, then return here to stop and upload.'
+          ? 'Smart recording active. Launching the test app…'
           : result.error ?? 'Screen recording could not start.';
     });
+    if (!_recording || _credentials == null) return;
+    try {
+      await _api.reportDiagnostic(
+        credentials: _credentials!,
+        category: 'capture',
+        eventType: 'recording_started',
+        message: 'Tester started a consented smart recording.',
+        buildId: build.id,
+        context: {
+          'captureId': captureId,
+          if (_activeTestRun != null) 'testRunId': _activeTestRun!.id,
+        },
+      );
+      final packageName = _snapshot?.packageName;
+      if (packageName != null && packageName.isNotEmpty) {
+        final handoff = await _api.createSdkHandoff(
+          credentials: _credentials!,
+          build: build,
+        );
+        await _installer.launch(
+          packageName: packageName,
+          baseUri: _credentials!.baseUri,
+          handoffToken: handoff.token,
+          captureId: captureId,
+        );
+      }
+      if (mounted) {
+        setState(
+          () => _downloadMessage =
+              'Smart recording active. Reproduce the problem, then return to stop and upload.',
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(
+          () => _downloadMessage =
+              'Recording is active, but the test app could not be launched automatically: $error',
+        );
+      }
+    }
+  }
+
+  Future<void> _startGuidedTest(GuidedTestRun run) async {
+    if (_recording || _credentials == null) return;
+    setState(() => _activeTestRun = run);
+    await _startRecording();
+    final captureId = _recordingId;
+    if (!_recording || captureId == null) {
+      if (mounted) setState(() => _activeTestRun = null);
+      return;
+    }
+    try {
+      await _api.startTestRun(
+        credentials: _credentials!,
+        run: run,
+        captureId: captureId,
+      );
+      await _refresh();
+    } catch (error) {
+      await _stopRecording();
+      if (mounted) {
+        setState(() {
+          _activeTestRun = null;
+          _downloadMessage = 'The guided run could not be started: $error';
+        });
+      }
+    }
+  }
+
+  Future<void> _finishGuidedTest() async {
+    final run = _activeTestRun;
+    final captureId = _recordingId;
+    if (run == null || captureId == null || _credentials == null) {
+      await _stopRecording();
+      return;
+    }
+    await _stopRecording();
+    if (!mounted) return;
+    final result = await _askTestVerdict(run);
+    if (result == null || !mounted) return;
+    setState(
+      () => _downloadMessage = result.$1 == 'failed'
+          ? 'Failure saved. Azure AI is analyzing the correlated evidence…'
+          : 'Saving ${result.$1} test result…',
+    );
+    try {
+      if (result.$1 == 'failed') {
+        await _api.reportDiagnostic(
+          credentials: _credentials!,
+          category: 'test',
+          eventType: 'guided_test_failed',
+          level: 'error',
+          message: result.$2?.isNotEmpty == true
+              ? result.$2!
+              : 'Guided test failed: ${run.title}',
+          details: 'Expected result: ${run.expectedResult}',
+          buildId: run.buildId,
+          fingerprint: 'test-run-${run.id}',
+          context: {'captureId': captureId, 'testRunId': run.id},
+        );
+      }
+      final completion = await _api.completeTestRun(
+        credentials: _credentials!,
+        run: run,
+        verdict: result.$1,
+        notes: result.$2,
+        captureId: captureId,
+      );
+      if (!mounted) return;
+      final analysis = completion.analysis;
+      setState(() {
+        _activeTestRun = null;
+        _downloadMessage = analysis == null
+            ? completion.analysisMessage ?? 'Test marked ${result.$1}.'
+            : '${analysis.summary}\n\nWhere: ${analysis.problemLocation}\n\nSolution: ${analysis.suggestedFix}\nConfidence: ${analysis.confidence}%';
+      });
+      await _refresh();
+    } catch (error) {
+      if (mounted) setState(() => _downloadMessage = error.toString());
+    }
+  }
+
+  Future<(String, String?)?> _askTestVerdict(GuidedTestRun run) async {
+    final notes = TextEditingController();
+    try {
+      return await showModalBottomSheet<(String, String?)>(
+        context: context,
+        isScrollControlled: true,
+        isDismissible: false,
+        enableDrag: false,
+        builder: (context) => Padding(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            20,
+            20,
+            MediaQuery.viewInsetsOf(context).bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                run.title,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Expected: ${run.expectedResult}',
+                style: const TextStyle(color: Color(0xFF91A79F)),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: notes,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'What did you observe? (optional)',
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => Navigator.pop(context, (
+                      'passed',
+                      notes.text.trim().isEmpty ? null : notes.text.trim(),
+                    )),
+                    icon: const Icon(Icons.check),
+                    label: const Text('Passed'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: () => Navigator.pop(context, (
+                      'failed',
+                      notes.text.trim().isEmpty ? null : notes.text.trim(),
+                    )),
+                    icon: const Icon(Icons.close),
+                    label: const Text('Failed'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, (
+                      'blocked',
+                      notes.text.trim().isEmpty ? null : notes.text.trim(),
+                    )),
+                    child: const Text('Blocked'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      notes.dispose();
+    }
   }
 
   Future<void> _stopRecording() async {
     if (!_recording) return;
     final (result, file) = await _screenRecorder.stop();
     final build = _recordingBuild;
+    final captureId = _recordingId;
+    final frameFiles = result.framePaths.map(File.new).toList(growable: false);
     if (mounted) {
       setState(() {
         _recording = false;
@@ -380,13 +591,46 @@ class _HomeScreenState extends State<HomeScreen> {
             : 'Uploading screen recording…';
       });
     }
-    if (file == null || build == null || _credentials == null) return;
+    if (file == null || build == null || _credentials == null) {
+      for (final frame in frameFiles) {
+        if (await frame.exists()) await frame.delete();
+      }
+      return;
+    }
     try {
-      await _api.uploadAttachment(
+      final recordingAttachmentId = await _api.uploadAttachment(
         credentials: _credentials!,
         file: file,
         kind: 'recording',
         build: build,
+        captureId: captureId,
+      );
+      final frameAttachmentIds = <String>[];
+      for (final frame in frameFiles) {
+        if (!await frame.exists()) continue;
+        frameAttachmentIds.add(
+          await _api.uploadAttachment(
+            credentials: _credentials!,
+            file: frame,
+            kind: 'recording-frame',
+            build: build,
+            captureId: captureId,
+          ),
+        );
+      }
+      await _api.reportDiagnostic(
+        credentials: _credentials!,
+        category: 'capture',
+        eventType: 'recording_evidence_uploaded',
+        message:
+            'Smart recording and ${frameAttachmentIds.length} visual keyframes uploaded.',
+        buildId: build.id,
+        metrics: {'visualFrames': frameAttachmentIds.length.toDouble()},
+        context: {
+          'captureId': captureId ?? '',
+          'recordingAttachmentId': recordingAttachmentId,
+          'frameAttachmentIds': frameAttachmentIds.join(','),
+        },
       );
       if (mounted) {
         setState(
@@ -398,7 +642,11 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) setState(() => _downloadMessage = error.toString());
     } finally {
       if (await file.exists()) await file.delete();
+      for (final frame in frameFiles) {
+        if (await frame.exists()) await frame.delete();
+      }
       _recordingBuild = null;
+      _recordingId = null;
     }
   }
 
@@ -461,8 +709,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 downloadProgress: _downloadProgress,
                 downloadMessage: _downloadMessage,
                 recording: _recording,
+                activeTestRun: _activeTestRun,
+                onStartGuidedTest: _startGuidedTest,
                 onStartRecording: _startRecording,
-                onStopRecording: _stopRecording,
+                onStopRecording: _activeTestRun == null
+                    ? _stopRecording
+                    : _finishGuidedTest,
               ),
       ),
     ),
@@ -541,6 +793,8 @@ class _ConnectedView extends StatelessWidget {
     required this.downloadProgress,
     required this.downloadMessage,
     required this.recording,
+    required this.activeTestRun,
+    required this.onStartGuidedTest,
     required this.onStartRecording,
     required this.onStopRecording,
   });
@@ -553,6 +807,8 @@ class _ConnectedView extends StatelessWidget {
   final double? downloadProgress;
   final String? downloadMessage;
   final bool recording;
+  final GuidedTestRun? activeTestRun;
+  final Future<void> Function(GuidedTestRun) onStartGuidedTest;
   final Future<void> Function() onStartRecording;
   final Future<void> Function() onStopRecording;
 
@@ -562,6 +818,72 @@ class _ConnectedView extends StatelessWidget {
     child: ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        if (snapshot != null && snapshot!.testRuns.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 22, 4, 10),
+            child: Text(
+              'GUIDED TESTS',
+              style: TextStyle(
+                color: Color(0xFF5DF2AD),
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.4,
+              ),
+            ),
+          ),
+          ...snapshot!.testRuns.map(
+            (run) => Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            run.title,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          run.status.toUpperCase(),
+                          style: const TextStyle(
+                            color: Color(0xFF5DF2AD),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(run.instructions),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Expected: ${run.expectedResult}',
+                      style: const TextStyle(color: Color(0xFF91A79F)),
+                    ),
+                    const SizedBox(height: 14),
+                    FilledButton.icon(
+                      onPressed: recording || run.status == 'running'
+                          ? null
+                          : () => onStartGuidedTest(run),
+                      icon: const Icon(Icons.play_arrow),
+                      label: Text(
+                        run.status == 'running'
+                            ? 'Run active'
+                            : 'Start with recording',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
         Card(
           child: Padding(
             padding: const EdgeInsets.all(20),
@@ -636,11 +958,17 @@ class _ConnectedView extends StatelessWidget {
                   : const Color(0xFF5DF2AD),
             ),
             title: Text(
-              recording ? 'Recording test session' : 'Capture screen recording',
+              recording
+                  ? activeTestRun == null
+                        ? 'Recording test session'
+                        : 'Running: ${activeTestRun!.title}'
+                  : 'Capture screen recording',
             ),
             subtitle: Text(
               recording
-                  ? 'Return here after testing to stop and upload.'
+                  ? activeTestRun == null
+                        ? 'Return here after testing to stop and upload.'
+                        : 'Follow the guided steps, then return for a verdict and AI analysis.'
                   : 'Android will ask which screen or app you consent to share.',
             ),
             trailing: FilledButton(
@@ -649,7 +977,13 @@ class _ConnectedView extends StatelessWidget {
                   : recording
                   ? onStopRecording
                   : onStartRecording,
-              child: Text(recording ? 'Stop & upload' : 'Start'),
+              child: Text(
+                recording
+                    ? activeTestRun == null
+                          ? 'Stop & upload'
+                          : 'Finish test'
+                    : 'Start',
+              ),
             ),
           ),
         ),

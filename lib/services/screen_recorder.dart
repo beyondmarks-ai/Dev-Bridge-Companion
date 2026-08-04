@@ -3,15 +3,26 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 class RecordingResult {
-  const RecordingResult({required this.status, this.path, this.error});
+  const RecordingResult({
+    required this.status,
+    this.path,
+    this.framePaths = const [],
+    this.error,
+  });
   final String status;
   final String? path;
+  final List<String> framePaths;
   final String? error;
 
   factory RecordingResult.fromMap(Map<Object?, Object?> value) =>
       RecordingResult(
         status: value['status'] as String? ?? 'recording_failed',
         path: value['path'] as String?,
+        framePaths:
+            (value['framePaths'] as List<Object?>?)?.whereType<String>().toList(
+              growable: false,
+            ) ??
+            const [],
         error: value['error'] as String?,
       );
 }

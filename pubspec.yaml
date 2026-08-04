@@ -1,7 +1,7 @@
 name: dev_bridge
 description: "Secure Android companion for DevBridge test delivery."
 publish_to: "none"
-version: 0.3.0+3
+version: 0.5.0+5
 
 environment:
   sdk: ^3.12.2

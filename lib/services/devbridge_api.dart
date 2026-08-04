@@ -97,6 +97,7 @@ class DevBridgeApi {
     required String message,
     String level = 'info',
     String? details,
+    String? fingerprint,
     String? screen,
     String? buildId,
     Map<String, double>? metrics,
@@ -119,6 +120,7 @@ class DevBridgeApi {
                 'eventType': eventType,
                 'message': message,
                 'details': details,
+                'fingerprint': fingerprint,
                 'screen': screen,
                 'buildId': buildId,
                 'metrics': metrics,
@@ -165,6 +167,9 @@ class DevBridgeApi {
     required File file,
     required String kind,
     required DevBridgeBuild build,
+    String? fingerprint,
+    String? captureId,
+    DateTime? capturedAt,
   }) async {
     final request =
         http.MultipartRequest(
@@ -176,6 +181,11 @@ class DevBridgeApi {
           ..headers['Authorization'] = 'Bearer ${credentials.deviceToken}'
           ..fields['kind'] = kind
           ..fields['buildId'] = build.id
+          ..fields['fingerprint'] = fingerprint ?? ''
+          ..fields['captureId'] = captureId ?? ''
+          ..fields['capturedAt'] = (capturedAt ?? DateTime.now().toUtc())
+              .toUtc()
+              .toIso8601String()
           ..files.add(await http.MultipartFile.fromPath('file', file.path));
     final response = await _client
         .send(request)
@@ -206,6 +216,69 @@ class DevBridgeApi {
     }
     return SessionSnapshot.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
+  Future<void> startTestRun({
+    required ConnectionCredentials credentials,
+    required GuidedTestRun run,
+    required String captureId,
+  }) async {
+    final response = await _client
+        .post(
+          credentials.baseUri.resolve(
+            '/api/sessions/${credentials.sessionId}/test-runs/${run.id}/start',
+          ),
+          headers: {
+            'Authorization': 'Bearer ${credentials.deviceToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'captureId': captureId}),
+        )
+        .timeout(const Duration(seconds: 12));
+    if (response.statusCode != 200) {
+      throw DevBridgeException(
+        'Could not start the guided test (${response.statusCode}).',
+      );
+    }
+  }
+
+  Future<TestCompletionResult> completeTestRun({
+    required ConnectionCredentials credentials,
+    required GuidedTestRun run,
+    required String verdict,
+    required String captureId,
+    String? notes,
+  }) async {
+    final response = await _client
+        .post(
+          credentials.baseUri.resolve(
+            '/api/sessions/${credentials.sessionId}/test-runs/${run.id}/complete',
+          ),
+          headers: {
+            'Authorization': 'Bearer ${credentials.deviceToken}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'verdict': verdict,
+            'notes': notes,
+            'captureId': captureId,
+          }),
+        )
+        .timeout(const Duration(minutes: 2));
+    final json = response.body.isEmpty
+        ? <String, dynamic>{}
+        : jsonDecode(response.body) as Map<String, dynamic>;
+    if (response.statusCode != 200) {
+      throw DevBridgeException(
+        json['error'] as String? ??
+            'Could not complete the guided test (${response.statusCode}).',
+      );
+    }
+    final analysis = json['analysis'] as Map<String, dynamic>?;
+    return TestCompletionResult(
+      analysis: analysis == null ? null : AiDiagnosis.fromJson(analysis),
+      analysisMessage: json['analysisMessage'] as String?,
     );
   }
 

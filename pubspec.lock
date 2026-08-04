@@ -79,7 +79,7 @@ packages:
       path: "packages/devbridge_diagnostics"
       relative: true
     source: path
-    version: "0.2.0"
+    version: "0.3.0"
   device_info_plus:
     dependency: "direct main"
     description:

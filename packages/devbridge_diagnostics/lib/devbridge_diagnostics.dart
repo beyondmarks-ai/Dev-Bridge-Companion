@@ -21,6 +21,9 @@ class DevBridgeDiagnosticsConfig {
     this.appVersion,
     this.environment = 'test',
     this.sendPerformanceMetrics = true,
+    this.captureId,
+    this.captureFailureScreenshots = true,
+    this.maximumBreadcrumbs = 20,
   });
 
   final Uri baseUri;
@@ -30,6 +33,9 @@ class DevBridgeDiagnosticsConfig {
   final String? appVersion;
   final String environment;
   final bool sendPerformanceMetrics;
+  final String? captureId;
+  final bool captureFailureScreenshots;
+  final int maximumBreadcrumbs;
 }
 
 class DevBridgeDiagnostics with WidgetsBindingObserver {
@@ -42,6 +48,8 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
   final http.Client _client;
   final List<Map<String, Object?>> _pending = [];
   final List<FrameTiming> _frames = [];
+  final List<_DiagnosticBreadcrumb> _breadcrumbs = [];
+  DevBridgeCaptureController? _captureController;
   Timer? _flushTimer;
   String? _screen;
   bool _flushing = false;
@@ -109,6 +117,7 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     if (handoff == null) return null;
     final baseUri = Uri.tryParse(handoff['baseUrl'] as String? ?? '');
     final handoffToken = handoff['handoffToken'] as String?;
+    final captureId = handoff['captureId'] as String?;
     if (baseUri == null || handoffToken == null) return null;
     final transport = client ?? http.Client();
     try {
@@ -129,6 +138,7 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
           buildId: json['buildId'] as String,
           appVersion: appVersion,
           environment: environment,
+          captureId: captureId,
         ),
         client: transport,
       );
@@ -189,8 +199,7 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     _previousFlutterHandler = FlutterError.onError;
     _installedFlutterHandler = (details) {
       unawaited(
-        capture(
-          category: 'crash',
+        _captureFailure(
           eventType: 'flutter_error',
           level: 'error',
           message: details.exceptionAsString(),
@@ -209,8 +218,7 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     _previousPlatformHandler = PlatformDispatcher.instance.onError;
     _installedPlatformHandler = (error, stack) {
       unawaited(
-        capture(
-          category: 'crash',
+        _captureFailure(
           eventType: 'uncaught_async_error',
           level: 'fatal',
           message: error.toString(),
@@ -222,6 +230,46 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     PlatformDispatcher.instance.onError = _installedPlatformHandler;
   }
 
+  Future<void> _captureFailure({
+    required String eventType,
+    required String level,
+    required String message,
+    String? details,
+    StackTrace? stackTrace,
+  }) async {
+    final fingerprint = _stableFingerprint(
+      'crash|$eventType|$message|${stackTrace?.toString().split('\n').first ?? ''}',
+    );
+    String? attachmentId;
+    if (_config.captureFailureScreenshots && _captureController != null) {
+      try {
+        final bytes = await _captureController!._capturePng();
+        if (bytes != null) {
+          attachmentId = await uploadAttachment(
+            bytes: bytes,
+            fileName: 'failure-${DateTime.now().millisecondsSinceEpoch}.png',
+            contentType: 'image/png',
+            kind: 'failure-screenshot',
+            fingerprint: fingerprint,
+            capturedAt: DateTime.now().toUtc(),
+          );
+        }
+      } catch (_) {
+        // A screenshot is supporting evidence and must never suppress the crash.
+      }
+    }
+    await capture(
+      category: 'crash',
+      eventType: eventType,
+      level: level,
+      message: message,
+      details: details,
+      stackTrace: stackTrace,
+      fingerprint: fingerprint,
+      context: attachmentId == null ? null : {'attachmentId': attachmentId},
+    );
+  }
+
   Future<void> capture({
     required String category,
     required String eventType,
@@ -231,7 +279,17 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     StackTrace? stackTrace,
     Map<String, double>? metrics,
     Map<String, String>? context,
+    String? fingerprint,
   }) async {
+    final includeBreadcrumbs =
+        level == 'error' ||
+        level == 'fatal' ||
+        category == 'crash' ||
+        category == 'anr';
+    final mergedContext = <String, String>{...?context};
+    final captureId = _config.captureId;
+    if (captureId != null) mergedContext['captureId'] = captureId;
+    if (includeBreadcrumbs) mergedContext.addAll(_breadcrumbContext());
     _pending.add({
       'level': level,
       'category': category,
@@ -242,7 +300,8 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
       'screen': _screen,
       'buildId': _config.buildId,
       'metrics': metrics,
-      'context': context,
+      'context': mergedContext,
+      'fingerprint': fingerprint,
       'occurredAt': DateTime.now().toUtc().toIso8601String(),
     });
     if (_pending.length > 200) _pending.removeRange(0, _pending.length - 200);
@@ -252,6 +311,7 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
   void setCurrentScreen(String? screen) {
     if (screen == null || screen.trim().isEmpty || screen == _screen) return;
     _screen = screen.trim();
+    recordBreadcrumb(kind: 'navigation', message: 'Opened $_screen.');
     unawaited(
       capture(
         category: 'navigation',
@@ -259,6 +319,53 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
         message: 'Opened $_screen.',
       ),
     );
+  }
+
+  void attachCaptureController(DevBridgeCaptureController controller) {
+    _captureController = controller;
+  }
+
+  void recordAction(String label, {Map<String, String>? metadata}) {
+    recordBreadcrumb(kind: 'action', message: label, metadata: metadata);
+  }
+
+  void recordBreadcrumb({
+    required String kind,
+    required String message,
+    Map<String, String>? metadata,
+  }) {
+    final cleanMetadata = <String, String>{};
+    for (final entry in (metadata ?? const <String, String>{}).entries.take(
+      6,
+    )) {
+      cleanMetadata[_safeText(entry.key, 40)] = _safeText(entry.value, 120);
+    }
+    _breadcrumbs.add(
+      _DiagnosticBreadcrumb(
+        occurredAt: DateTime.now().toUtc(),
+        kind: _safeText(kind, 30),
+        message: _safeText(message, 160),
+        metadata: cleanMetadata,
+      ),
+    );
+    final maximum = _config.maximumBreadcrumbs.clamp(5, 30);
+    if (_breadcrumbs.length > maximum) {
+      _breadcrumbs.removeRange(0, _breadcrumbs.length - maximum);
+    }
+  }
+
+  Map<String, String> _breadcrumbContext() {
+    final selected = _breadcrumbs.reversed.take(15).toList().reversed;
+    var index = 1;
+    return {
+      for (final item in selected)
+        'breadcrumb.${index++}': jsonEncode({
+          'at': item.occurredAt.toIso8601String(),
+          'kind': item.kind,
+          'message': item.message,
+          if (item.metadata.isNotEmpty) 'metadata': item.metadata,
+        }),
+    };
   }
 
   void _onFrameTimings(List<FrameTiming> timings) {
@@ -293,6 +400,10 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    recordBreadcrumb(
+      kind: 'lifecycle',
+      message: 'Application changed to ${state.name}.',
+    );
     unawaited(
       capture(
         category: 'lifecycle',
@@ -334,6 +445,9 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     required String fileName,
     required String contentType,
     required String kind,
+    String? fingerprint,
+    String? captureId,
+    DateTime? capturedAt,
   }) async {
     final request =
         http.MultipartRequest(
@@ -345,6 +459,11 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
           ..headers['Authorization'] = 'Bearer ${_config.deviceToken}'
           ..fields['buildId'] = _config.buildId
           ..fields['kind'] = kind
+          ..fields['captureId'] = captureId ?? _config.captureId ?? ''
+          ..fields['fingerprint'] = fingerprint ?? ''
+          ..fields['capturedAt'] = (capturedAt ?? DateTime.now().toUtc())
+              .toUtc()
+              .toIso8601String()
           ..files.add(
             http.MultipartFile.fromBytes(
               'file',
@@ -360,6 +479,27 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
     final body = await response.stream.bytesToString();
     return (jsonDecode(body) as Map<String, dynamic>)['attachmentId']
         as String?;
+  }
+
+  static String _stableFingerprint(String value) {
+    var hash = 0xcbf29ce484222325;
+    for (final unit in value.codeUnits) {
+      hash ^= unit;
+      hash = (hash * 0x100000001b3) & 0xffffffffffffffff;
+    }
+    return 'sdk-${hash.toRadixString(16).padLeft(16, '0')}';
+  }
+
+  static String _safeText(String value, int maximum) {
+    var clean = value.replaceAll(
+      RegExp(
+        r'(authorization|cookie|token|password|secret|api[-_]?key)(\s*[:=]\s*)([^\s,;]+)',
+        caseSensitive: false,
+      ),
+      r'$1$2[REDACTED]',
+    );
+    if (clean.length > maximum) clean = clean.substring(0, maximum);
+    return clean;
   }
 
   Future<void> dispose() async {
@@ -383,10 +523,105 @@ class DevBridgeDiagnostics with WidgetsBindingObserver {
   }
 }
 
+class _DiagnosticBreadcrumb {
+  const _DiagnosticBreadcrumb({
+    required this.occurredAt,
+    required this.kind,
+    required this.message,
+    required this.metadata,
+  });
+
+  final DateTime occurredAt;
+  final String kind;
+  final String message;
+  final Map<String, String> metadata;
+}
+
+class DevBridgeHttpClient extends http.BaseClient {
+  DevBridgeHttpClient(this._diagnostics, {http.Client? inner})
+    : _inner = inner ?? http.Client();
+
+  final DevBridgeDiagnostics _diagnostics;
+  final http.Client _inner;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final stopwatch = Stopwatch()..start();
+    final endpoint = _safeEndpoint(request.url);
+    _diagnostics.recordBreadcrumb(
+      kind: 'network',
+      message: '${request.method} $endpoint started',
+    );
+    try {
+      final response = await _inner.send(request);
+      stopwatch.stop();
+      _diagnostics.recordBreadcrumb(
+        kind: 'network',
+        message: '${request.method} $endpoint returned ${response.statusCode}',
+        metadata: {'durationMs': '${stopwatch.elapsedMilliseconds}'},
+      );
+      if (response.statusCode >= 500) {
+        unawaited(
+          _diagnostics.capture(
+            category: 'network',
+            eventType: 'server_error',
+            level: 'error',
+            message:
+                '${request.method} $endpoint returned ${response.statusCode}.',
+            metrics: {
+              'durationMs': stopwatch.elapsedMilliseconds.toDouble(),
+              'statusCode': response.statusCode.toDouble(),
+            },
+          ),
+        );
+      }
+      return response;
+    } catch (error) {
+      stopwatch.stop();
+      _diagnostics.recordBreadcrumb(
+        kind: 'network',
+        message: '${request.method} $endpoint failed',
+        metadata: {
+          'durationMs': '${stopwatch.elapsedMilliseconds}',
+          'errorType': error.runtimeType.toString(),
+        },
+      );
+      unawaited(
+        _diagnostics.capture(
+          category: 'network',
+          eventType: 'request_failed',
+          level: 'error',
+          message: '${request.method} $endpoint failed.',
+          details: error.runtimeType.toString(),
+          metrics: {'durationMs': stopwatch.elapsedMilliseconds.toDouble()},
+        ),
+      );
+      rethrow;
+    }
+  }
+
+  static String _safeEndpoint(Uri uri) {
+    final segments = uri.pathSegments.map((segment) {
+      if (RegExp(r'^\d{4,}$').hasMatch(segment) ||
+          RegExp(
+            r'^[0-9a-f]{8}-[0-9a-f-]{27,}$',
+            caseSensitive: false,
+          ).hasMatch(segment)) {
+        return ':id';
+      }
+      return segment.length > 50 ? ':value' : segment;
+    });
+    return Uri(pathSegments: segments).path;
+  }
+
+  @override
+  void close() => _inner.close();
+}
+
 class DevBridgeCaptureController {
   final GlobalKey boundaryKey = GlobalKey();
 
-  Future<String?> captureScreenshot({double pixelRatio = 1.5}) async {
+  Future<Uint8List?> _capturePng({double pixelRatio = 1.5}) async {
     final context = boundaryKey.currentContext;
     if (context == null) return null;
     final boundary = context.findRenderObject() as RenderRepaintBoundary?;
@@ -395,8 +630,14 @@ class DevBridgeCaptureController {
     final data = await image.toByteData(format: ImageByteFormat.png);
     image.dispose();
     if (data == null) return null;
+    return data.buffer.asUint8List();
+  }
+
+  Future<String?> captureScreenshot({double pixelRatio = 1.5}) async {
+    final bytes = await _capturePng(pixelRatio: pixelRatio);
+    if (bytes == null) return null;
     return DevBridgeDiagnostics.instance.uploadAttachment(
-      bytes: data.buffer.asUint8List(),
+      bytes: bytes,
       fileName: 'devbridge-${DateTime.now().millisecondsSinceEpoch}.png',
       contentType: 'image/png',
       kind: 'screenshot',
@@ -415,8 +656,24 @@ class DevBridgeCaptureBoundary extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) =>
-      RepaintBoundary(key: controller.boundaryKey, child: child);
+  Widget build(BuildContext context) {
+    final diagnostics = DevBridgeDiagnostics._instance;
+    diagnostics?.attachCaptureController(controller);
+    final size = MediaQuery.sizeOf(context);
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerUp: (event) => diagnostics?.recordAction(
+        'Pointer released',
+        metadata: {
+          'x': event.position.dx.toStringAsFixed(0),
+          'y': event.position.dy.toStringAsFixed(0),
+          'screenWidth': size.width.toStringAsFixed(0),
+          'screenHeight': size.height.toStringAsFixed(0),
+        },
+      ),
+      child: RepaintBoundary(key: controller.boundaryKey, child: child),
+    );
+  }
 }
 
 class DevBridgeNavigatorObserver extends NavigatorObserver {

@@ -100,6 +100,7 @@ class SessionSnapshot {
     required this.packageName,
     required this.expiresAt,
     required this.builds,
+    required this.testRuns,
   });
 
   final String projectName;
@@ -107,6 +108,7 @@ class SessionSnapshot {
   final String? packageName;
   final DateTime expiresAt;
   final List<DevBridgeBuild> builds;
+  final List<GuidedTestRun> testRuns;
 
   factory SessionSnapshot.fromJson(Map<String, dynamic> json) =>
       SessionSnapshot(
@@ -119,7 +121,76 @@ class SessionSnapshot {
               (item) => DevBridgeBuild.fromJson(item as Map<String, dynamic>),
             )
             .toList(growable: false),
+        testRuns: ((json['testRuns'] as List<dynamic>?) ?? const [])
+            .map((item) => GuidedTestRun.fromJson(item as Map<String, dynamic>))
+            .toList(growable: false),
       );
+}
+
+class GuidedTestRun {
+  const GuidedTestRun({
+    required this.id,
+    required this.testCaseId,
+    required this.title,
+    required this.instructions,
+    required this.expectedResult,
+    required this.priority,
+    required this.status,
+    required this.buildId,
+    required this.captureId,
+  });
+
+  final String id;
+  final String testCaseId;
+  final String title;
+  final String instructions;
+  final String expectedResult;
+  final String priority;
+  final String status;
+  final String? buildId;
+  final String? captureId;
+
+  factory GuidedTestRun.fromJson(Map<String, dynamic> json) {
+    final testCase = json['testCase'] as Map<String, dynamic>? ?? const {};
+    return GuidedTestRun(
+      id: json['id'] as String,
+      testCaseId: json['testCaseId'] as String,
+      title: testCase['title'] as String? ?? 'Guided test',
+      instructions: testCase['instructions'] as String? ?? '',
+      expectedResult: testCase['expectedResult'] as String? ?? '',
+      priority: testCase['priority'] as String? ?? 'normal',
+      status: json['status'] as String? ?? 'ready',
+      buildId: json['buildId'] as String?,
+      captureId: json['captureId'] as String?,
+    );
+  }
+}
+
+class AiDiagnosis {
+  const AiDiagnosis({
+    required this.summary,
+    required this.problemLocation,
+    required this.suggestedFix,
+    required this.confidence,
+  });
+
+  final String summary;
+  final String problemLocation;
+  final String suggestedFix;
+  final int confidence;
+
+  factory AiDiagnosis.fromJson(Map<String, dynamic> json) => AiDiagnosis(
+    summary: json['summary'] as String,
+    problemLocation: json['problemLocation'] as String,
+    suggestedFix: json['suggestedFix'] as String,
+    confidence: json['confidence'] as int,
+  );
+}
+
+class TestCompletionResult {
+  const TestCompletionResult({this.analysis, this.analysisMessage});
+  final AiDiagnosis? analysis;
+  final String? analysisMessage;
 }
 
 class SdkHandoff {

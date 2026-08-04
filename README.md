@@ -27,7 +27,10 @@ The app pairs with a DevBridge server by scanning a short-lived QR code. After p
 - Included `devbridge_diagnostics` Flutter package for opt-in target-app telemetry.
 - Automatic one-use SDK enrollment when DevBridge launches an instrumented target app.
 - User-consented Android screen recording with a visible foreground-service notification.
-- Automatic upload of completed recordings to the protected diagnostic timeline.
+- Automatic upload of completed recordings plus four on-device visual keyframes to the protected diagnostic timeline.
+- Capture IDs that correlate recordings, screenshots, actions, network breadcrumbs, crashes, devices, and builds.
+- Guided test cases with plain-English steps, expected results, priority, and assigned build.
+- Passed, failed, and blocked verdicts with tester notes and direct Azure AI failure diagnoses.
 - Secure disconnect and credential removal.
 
 ## How it works

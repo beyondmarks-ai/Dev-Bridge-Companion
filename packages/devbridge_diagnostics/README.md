@@ -24,6 +24,34 @@ final diagnostics = await DevBridgeDiagnostics.initializeFromLaunch(
 );
 ```
 
+Wrap the application in a capture boundary to enable consent-scoped pointer breadcrumbs and automatic screenshots when Flutter reports a failure:
+
+```dart
+final captureController = DevBridgeCaptureController();
+
+runApp(DevBridgeCaptureBoundary(
+  controller: captureController,
+  child: MyApp(
+    navigatorObservers: diagnostics == null
+        ? []
+        : [DevBridgeNavigatorObserver()],
+  ),
+));
+```
+
+Use the diagnostics HTTP client where network breadcrumbs are required. It records only the method, sanitized path, status, duration, and error type; query strings, headers, and bodies are never collected:
+
+```dart
+final client = DevBridgeHttpClient(diagnostics);
+final response = await client.get(Uri.parse('$apiBase/orders'));
+```
+
+Business-level actions can be added without capturing field values:
+
+```dart
+diagnostics.recordAction('Pressed Place Order');
+```
+
 The handoff arrives as explicit intent extras for only the selected package, expires after two minutes, and can be exchanged once. The returned SDK credential is separate from the companion credential and scoped to the session and build.
 
 Manual initialization remains available for CI or controlled test environments:
@@ -55,5 +83,7 @@ Never hard-code a long-lived production secret. DevBridge device tokens are shor
 - Android historical ANRs, native crashes, low-memory kills, and initialization failures
 - Target-owned screenshots through `DevBridgeCaptureBoundary`
 - Developer-defined diagnostic events
+- Bounded action, navigation, lifecycle, and redacted network breadcrumbs attached to failures
+- Automatic failure screenshots when the app opts into `DevBridgeCaptureBoundary`
 
 The SDK batches events, bounds its in-memory queue, and relies on the server to redact common credential fields before Azure archival.

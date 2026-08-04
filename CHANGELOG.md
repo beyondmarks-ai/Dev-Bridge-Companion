@@ -4,11 +4,28 @@ All notable changes are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-04
+
+### Added
+
+- Guided tests assigned from the developer dashboard with steps and observable expectations.
+- Consent-driven recording automatically linked to each guided run.
+- Passed, failed, and blocked verdict capture with tester notes.
+- Immediate plain-English Azure AI diagnosis in the companion after a failed run.
+
+## [0.4.0] - 2026-08-04
+
+### Added
+
+- Bounded redacted action, navigation, lifecycle, and network breadcrumbs on failures.
+- Automatic crash screenshots through the opt-in Flutter capture boundary.
+- Smart recording capture IDs, automatic target-app launch, and four on-device visual keyframes.
+
 ### Planned
 
 - Background build notifications.
 - Resumable downloads.
-- Screenshot annotation, voice notes, and structured test reports.
+- Screenshot annotation and voice notes.
 
 ## [0.3.0] - 2026-08-03
 

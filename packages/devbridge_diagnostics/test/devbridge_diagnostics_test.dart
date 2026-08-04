@@ -92,4 +92,47 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
+
+  test('attaches a bounded redacted breadcrumb trail to failures', () async {
+    http.Request? captured;
+    final client = MockClient((request) async {
+      captured = request;
+      return http.Response('', 202);
+    });
+    final diagnostics = await DevBridgeDiagnostics.initialize(
+      DevBridgeDiagnosticsConfig(
+        baseUri: Uri.parse('https://devbridge.example'),
+        sessionId: 'session-id',
+        deviceToken: 'device-token',
+        buildId: '00000000-0000-0000-0000-000000000003',
+        captureId: 'capture-123',
+      ),
+      client: client,
+    );
+
+    diagnostics.recordAction('Pressed Place Order');
+    diagnostics.recordBreadcrumb(
+      kind: 'network',
+      message: 'POST /orders failed token=private-value',
+      metadata: {'status': 'timeout'},
+    );
+    await diagnostics.capture(
+      category: 'crash',
+      eventType: 'checkout_failed',
+      level: 'fatal',
+      message: 'Checkout failed',
+    );
+
+    final body = jsonDecode(captured!.body) as Map<String, dynamic>;
+    final events = body['events'] as List<dynamic>;
+    final context =
+        (events.last as Map<String, dynamic>)['context']
+            as Map<String, dynamic>;
+    expect(context['captureId'], 'capture-123');
+    expect(context.values.join(' '), contains('Pressed Place Order'));
+    expect(context.values.join(' '), contains('[REDACTED]'));
+    expect(context.values.join(' '), isNot(contains('private-value')));
+
+    await diagnostics.dispose();
+  });
 }

@@ -7,7 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
+import android.graphics.Bitmap
 import android.media.projection.MediaProjectionManager
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -17,6 +19,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 class MainActivity : FlutterActivity() {
@@ -52,20 +55,25 @@ class MainActivity : FlutterActivity() {
 
     private val recordingReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val response = mapOf(
-                "status" to intent.getStringExtra("status"),
-                "path" to intent.getStringExtra("path"),
-                "error" to intent.getStringExtra("error"),
-            )
-            when (intent.getStringExtra("status")) {
+            val status = intent.getStringExtra("status")
+            val path = intent.getStringExtra("path")
+            val error = intent.getStringExtra("error")
+            val response = mapOf("status" to status, "path" to path, "error" to error)
+            when (status) {
                 "recording_started" -> {
                     recordingStartResult?.success(response)
                     recordingStartResult = null
                 }
                 "recording_stopped" -> {
-                    recordingStopResult?.success(response)
+                    val pending = recordingStopResult
                     recordingStopResult = null
                     recordingPath = null
+                    Thread {
+                        val frames = path?.let(::extractVideoFrames).orEmpty()
+                        runOnUiThread {
+                            pending?.success(response + ("framePaths" to frames))
+                        }
+                    }.start()
                 }
                 "recording_failed" -> {
                     recordingStartResult?.success(response)
@@ -98,6 +106,7 @@ class MainActivity : FlutterActivity() {
                         call.argument("packageName"),
                         call.argument("baseUrl"),
                         call.argument("handoffToken"),
+                        call.argument("captureId"),
                         result,
                     )
                     "startScreenRecording" -> startScreenRecording(result)
@@ -198,7 +207,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun launchPackage(targetPackage: String?, baseUrl: String?, handoffToken: String?, result: MethodChannel.Result) {
+    private fun launchPackage(targetPackage: String?, baseUrl: String?, handoffToken: String?, captureId: String?, result: MethodChannel.Result) {
         if (targetPackage.isNullOrBlank()) {
             result.success(resultMap("package_unknown", "The session does not specify an application package name.", null, null, null))
             return
@@ -213,6 +222,7 @@ class MainActivity : FlutterActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 putExtra("devbridge.baseUrl", baseUrl)
                 putExtra("devbridge.handoffToken", handoffToken)
+                captureId?.let { putExtra("devbridge.captureId", it) }
             }
             startActivity(launchIntent)
             result.success(resultMap("launch_requested", "Application launch requested.", null, targetPackage, null))
@@ -225,6 +235,35 @@ class MainActivity : FlutterActivity() {
         pendingInstalls.remove(sessionId)
         val packageName = packageManager.packageInstaller.getSessionInfo(sessionId)?.appPackageName
         result.success(resultMap(status, message, statusCode, packageName, details))
+    }
+
+    private fun extractVideoFrames(path: String): List<String> {
+        val video = File(path)
+        if (!video.isFile) return emptyList()
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(video.absolutePath)
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                ?: return emptyList()
+            listOf(0.05, 0.35, 0.65, 0.90).mapIndexedNotNull { index, fraction ->
+                val frame = retriever.getFrameAtTime(
+                    (durationMs * 1000 * fraction).toLong(),
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                ) ?: return@mapIndexedNotNull null
+                val width = minOf(720, frame.width)
+                val height = (frame.height * (width.toDouble() / frame.width)).toInt().coerceAtLeast(2)
+                val scaled = if (width == frame.width) frame else Bitmap.createScaledBitmap(frame, width, height, true)
+                val output = File(cacheDir, "devbridge-frame-${System.currentTimeMillis()}-$index.jpg")
+                FileOutputStream(output).use { scaled.compress(Bitmap.CompressFormat.JPEG, 82, it) }
+                if (scaled !== frame) scaled.recycle()
+                frame.recycle()
+                output.absolutePath
+            }
+        } catch (_: Exception) {
+            emptyList()
+        } finally {
+            retriever.release()
+        }
     }
 
     private fun resultMap(status: String, message: String, statusCode: Int?, packageName: String?, details: String?) = mapOf(

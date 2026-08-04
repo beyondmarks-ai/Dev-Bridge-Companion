@@ -45,12 +45,14 @@ class ApkInstaller {
     required String packageName,
     required Uri baseUri,
     required String handoffToken,
+    String? captureId,
   }) async {
     final result = await _channel
         .invokeMethod<Map<Object?, Object?>>('launchPackage', {
           'packageName': packageName,
           'baseUrl': baseUri.toString(),
           'handoffToken': handoffToken,
+          'captureId': captureId,
         });
     return InstallResult.fromMap(result ?? const {});
   }
