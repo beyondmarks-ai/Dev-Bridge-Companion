@@ -16,7 +16,7 @@ dependencies:
     path: packages/devbridge_diagnostics
   flutter_secure_storage: ^10.3.1
   http: ^1.6.0
-  mobile_scanner: ^7.4.0
+  mobile_scanner: ^7.4.2
   path_provider: ^2.1.6
 
 dev_dependencies:
