@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
   crypto: ^3.0.7
   cupertino_icons: ^1.0.8
-  device_info_plus: ^13.2.0
+  device_info_plus: ^13.3.0
   devbridge_diagnostics:
     path: packages/devbridge_diagnostics
   flutter_secure_storage: ^10.3.1
